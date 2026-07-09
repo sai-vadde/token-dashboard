@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+from datetime import datetime
 
 from token_dashboard.db import init_db
 from token_dashboard.server import build_handler
@@ -62,6 +63,27 @@ class ServerTests(unittest.TestCase):
         body = json.loads(self._get("/api/plan"))
         self.assertIn("plan", body)
         self.assertIn("pricing", body)
+
+    def test_source_filter_json(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, type, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens, source) VALUES ('cu',NULL,'cs','cp','user','2026-04-20T00:00:00Z',NULL,0,0,0,0,0,'codex')")
+            c.execute("INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, type, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens, source) VALUES ('ca','cu','cs','cp','assistant','2026-04-20T00:00:01Z','gpt-5.4',7,8,0,0,0,'codex')")
+            c.commit()
+        body = json.loads(self._get("/api/overview?source=codex"))
+        self.assertEqual(body["sessions"], 1)
+        self.assertEqual(body["input_tokens"], 7)
+
+    def test_tips_source_filter_json(self):
+        ts = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, source) VALUES ('tip-m','tip-s','tip-p','assistant',?,'codex')", (ts,))
+            for i in range(12):
+                c.execute("INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error, source) VALUES ('tip-m','tip-s','tip-p','Read','src/app.py',?,0,'codex')", (ts,))
+            c.commit()
+        claude = json.loads(self._get("/api/tips?source=claude"))
+        codex = json.loads(self._get("/api/tips?source=codex"))
+        self.assertEqual(claude, [])
+        self.assertTrue(any(t["category"] == "repeat-file" for t in codex))
 
     def test_head_returns_200_not_501(self):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/", method="HEAD")

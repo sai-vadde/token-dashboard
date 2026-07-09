@@ -104,5 +104,23 @@ class DismissTests(unittest.TestCase):
         self.assertFalse(tips_after)
 
 
+class SourceTipTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+        with connect(self.db) as c:
+            c.execute("INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, source) VALUES ('m1','s1','p','assistant','2026-04-15T00:00:00Z','codex')")
+            for i in range(12):
+                c.execute("INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error, source) VALUES ('m1','s1','p','Read','src/app.py','2026-04-15T00:00:00Z',0,'codex')")
+            c.commit()
+
+    def test_all_tips_filters_by_source(self):
+        claude = all_tips(self.db, today_iso="2026-04-19T00:00:00", source="claude")
+        codex = all_tips(self.db, today_iso="2026-04-19T00:00:00", source="codex")
+        self.assertFalse(claude)
+        self.assertTrue(any(t["category"] == "repeat-file" for t in codex))
+
+
 if __name__ == "__main__":
     unittest.main()

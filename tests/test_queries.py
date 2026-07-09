@@ -7,7 +7,7 @@ from token_dashboard.db import (
     overview_totals, expensive_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, project_name_for,
-    skill_breakdown,
+    skill_breakdown, source_summary,
 )
 
 
@@ -180,6 +180,50 @@ class ProjectNameTests(unittest.TestCase):
             ),
             "Token Dashboard",
         )
+
+
+class SourceFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "src.db")
+        init_db(self.db)
+        with connect(self.db) as c:
+            c.executescript("""
+            INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, model,
+              input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens, source)
+            VALUES
+              ('claude-u','claude-s','projA','user','2026-04-10T00:00:00Z',NULL,0,0,0,0,0,'claude'),
+              ('claude-a','claude-s','projA','assistant','2026-04-10T00:00:01Z','claude-haiku-4-5',10,20,0,0,0,'claude'),
+              ('codex-u','codex-s','projB','user','2026-04-11T00:00:00Z',NULL,0,0,0,0,0,'codex'),
+              ('codex-a','codex-s','projB','assistant','2026-04-11T00:00:01Z','gpt-5.4',30,40,5,0,0,'codex');
+            """)
+            c.commit()
+
+    def test_overview_filters_by_source(self):
+        all_rows = overview_totals(self.db)
+        codex = overview_totals(self.db, source="codex")
+        claude = overview_totals(self.db, source="claude")
+        self.assertEqual(all_rows["sessions"], 2)
+        self.assertEqual(codex["sessions"], 1)
+        self.assertEqual(codex["input_tokens"], 30)
+        self.assertEqual(claude["output_tokens"], 20)
+
+    def test_source_summary_lists_sources(self):
+        rows = {r["source"]: r for r in source_summary(self.db)}
+        self.assertEqual(rows["claude"]["sessions"], 1)
+        self.assertEqual(rows["codex"]["tokens"], 75)
+
+    def test_recent_sessions_groups_same_id_by_source(self):
+        with connect(self.db) as c:
+            c.execute("""
+            INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, model,
+              input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens, source)
+            VALUES ('codex-same','claude-s','projB','assistant','2026-04-12T00:00:00Z','gpt-5.4',1,1,0,0,0,'codex')
+            """)
+            c.commit()
+        rows = recent_sessions(self.db, limit=10)
+        same_id = sorted(r["source"] for r in rows if r["session_id"] == "claude-s")
+        self.assertEqual(same_id, ["claude", "codex"])
 
 
 class ProjectNameInQueriesTests(unittest.TestCase):

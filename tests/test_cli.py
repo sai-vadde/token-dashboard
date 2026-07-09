@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -17,8 +18,8 @@ class CliTests(unittest.TestCase):
             f.write('{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s1","timestamp":"2026-04-19T00:00:01Z","isSidechain":false,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}\n')
         self.db = os.path.join(self.tmp, "t.db")
 
-    def _run(self, *args):
-        env = {**os.environ, "TOKEN_DASHBOARD_DB": self.db}
+    def _run(self, *args, extra_env=None):
+        env = {**os.environ, "TOKEN_DASHBOARD_DB": self.db, **(extra_env or {})}
         return subprocess.run(
             [sys.executable, "cli.py", *args],
             cwd=ROOT, env=env, capture_output=True, text=True,
@@ -31,6 +32,23 @@ class CliTests(unittest.TestCase):
         r2 = self._run("today")
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertIn("Token Dashboard", r2.stdout)
+
+    def test_projects_dir_without_cli_source_scans_as_claude(self):
+        r = self._run(
+            "scan", "--projects-dir", self.proj,
+            extra_env={"TOKEN_DASHBOARD_SOURCE": "codex"},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with sqlite3.connect(self.db) as c:
+            sources = [row[0] for row in c.execute("SELECT DISTINCT source FROM messages")]
+        self.assertEqual(sources, ["claude"])
+
+    def test_projects_dir_with_source_all_scans_as_claude(self):
+        r = self._run("scan", "--projects-dir", self.proj, "--source", "all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with sqlite3.connect(self.db) as c:
+            sources = [row[0] for row in c.execute("SELECT DISTINCT source FROM messages")]
+        self.assertEqual(sources, ["claude"])
 
     def test_stats(self):
         self._run("scan", "--projects-dir", self.proj)

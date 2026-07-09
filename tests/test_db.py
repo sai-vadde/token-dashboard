@@ -27,6 +27,30 @@ class InitDbTests(unittest.TestCase):
             r = c.execute("SELECT 1 AS one").fetchone()
         self.assertEqual(r["one"], 1)
 
+    def test_files_cursor_migration_preserves_existing_rows_as_claude(self):
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("""
+              CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                mtime REAL NOT NULL,
+                bytes_read INTEGER NOT NULL,
+                scanned_at REAL NOT NULL
+              )
+            """)
+            c.execute(
+                "INSERT INTO files (path, mtime, bytes_read, scanned_at) VALUES ('/tmp/session.jsonl', 1.0, 42, 2.0)"
+            )
+            c.commit()
+
+        init_db(self.db_path)
+
+        with sqlite3.connect(self.db_path) as c:
+            info = list(c.execute("PRAGMA table_info(files)"))
+            pk_cols = [row[1] for row in sorted((row for row in info if row[5]), key=lambda row: row[5])]
+            row = c.execute("SELECT source, path, mtime, bytes_read, scanned_at FROM files").fetchone()
+        self.assertEqual(pk_cols, ["source", "path"])
+        self.assertEqual(row, ("claude", "/tmp/session.jsonl", 1.0, 42, 2.0))
+
 
 if __name__ == "__main__":
     unittest.main()

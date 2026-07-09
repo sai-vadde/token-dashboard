@@ -17,19 +17,29 @@ export const fmt = {
     if (s.includes('opus'))   return 'opus';
     if (s.includes('sonnet')) return 'sonnet';
     if (s.includes('haiku'))  return 'haiku';
+    if (s.includes('gpt') || s.includes('codex') || s.startsWith('o')) return 'openai';
     return '';
   },
-  modelShort: m => (m || '').replace('claude-', ''),
+  modelShort: m => (m || '').replace('claude-', '').replace('openai/', ''),
   ts: t => (t || '').slice(0, 16).replace('T', ' '),
 };
 
 export async function api(path, opts) {
-  const r = await fetch(path, opts);
+  const r = await fetch(withSource(path), opts);
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
   return r.json();
 }
 
-export const state = { plan: 'api', pricing: null };
+export const state = {
+  plan: 'api',
+  pricing: null,
+  source: localStorage.getItem('td.source') || 'all',
+};
+
+function withSource(path) {
+  if (!path.startsWith('/api/') || path === '/api/plan' || state.source === 'all' || /[?&]source=/.test(path)) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'source=' + encodeURIComponent(state.source);
+}
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
@@ -50,10 +60,24 @@ function buildTopbar() {
       ${Object.keys(ROUTES).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
     </nav>
     <div class="spacer"></div>
+    <label class="source-switch" title="Switch between Claude and Codex transcript data">
+      <span>source</span>
+      <select id="source-select">
+        <option value="all">All</option>
+        <option value="claude">Claude</option>
+        <option value="codex">Codex</option>
+      </select>
+    </label>
     <span class="pill" id="plan-pill">api</span>
     <span class="pill muted" title="Cmd/Ctrl+B blurs sensitive text">⌘B blur</span>
   `;
   document.body.prepend(wrap);
+  $('#source-select').value = state.source;
+  $('#source-select').addEventListener('change', e => {
+    state.source = e.target.value;
+    localStorage.setItem('td.source', state.source);
+    render();
+  });
 }
 
 function setActiveTab(routeKey) {

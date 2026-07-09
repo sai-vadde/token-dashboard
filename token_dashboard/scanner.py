@@ -14,18 +14,18 @@ INSERT OR REPLACE INTO messages (
   uuid, parent_uuid, session_id, project_slug, cwd, git_branch, cc_version, entrypoint,
   type, is_sidechain, agent_id, timestamp, model, stop_reason, prompt_id, message_id,
   input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens,
-  prompt_text, prompt_chars, tool_calls_json
+  prompt_text, prompt_chars, tool_calls_json, source
 ) VALUES (
   :uuid, :parent_uuid, :session_id, :project_slug, :cwd, :git_branch, :cc_version, :entrypoint,
   :type, :is_sidechain, :agent_id, :timestamp, :model, :stop_reason, :prompt_id, :message_id,
   :input_tokens, :output_tokens, :cache_read_tokens, :cache_create_5m_tokens, :cache_create_1h_tokens,
-  :prompt_text, :prompt_chars, :tool_calls_json
+  :prompt_text, :prompt_chars, :tool_calls_json, :source
 )
 """
 
 INSERT_TOOL = """
-INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, result_tokens, is_error, timestamp)
-VALUES (:message_uuid, :session_id, :project_slug, :tool_name, :target, :result_tokens, :is_error, :timestamp)
+INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, result_tokens, is_error, timestamp, source)
+VALUES (:message_uuid, :session_id, :project_slug, :tool_name, :target, :result_tokens, :is_error, :timestamp, :source)
 """
 
 
@@ -55,6 +55,16 @@ def _usage(rec: dict) -> dict:
     }
 
 
+def _empty_usage() -> dict:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_create_5m_tokens": 0,
+        "cache_create_1h_tokens": 0,
+    }
+
+
 def _prompt_text(rec: dict) -> Tuple[Optional[str], Optional[int]]:
     if rec.get("type") != "user":
         return None, None
@@ -73,6 +83,23 @@ def _target(name: str, inp: dict) -> Optional[str]:
     if field and isinstance(inp, dict):
         v = inp.get(field)
         if isinstance(v, str):
+            return v[:500]
+    return None
+
+
+def _codex_target(name: str, raw_args) -> Optional[str]:
+    if isinstance(raw_args, str):
+        try:
+            inp = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return raw_args[:500]
+    elif isinstance(raw_args, dict):
+        inp = raw_args
+    else:
+        return None
+    for field in ("path", "file_path", "command", "url", "query", "q", "code", "name"):
+        v = inp.get(field)
+        if isinstance(v, str) and v:
             return v[:500]
     return None
 
@@ -122,7 +149,7 @@ def _extract_results(rec: dict) -> List[dict]:
     return out
 
 
-def parse_record(rec: dict, project_slug: str) -> Tuple[dict, List[dict]]:
+def parse_record(rec: dict, project_slug: str, source: str = "claude") -> Tuple[dict, List[dict]]:
     """Return (message_row, [tool_call_rows])."""
     msg_obj = rec.get("message") or {}
     text, chars = _prompt_text(rec)
@@ -146,6 +173,7 @@ def parse_record(rec: dict, project_slug: str) -> Tuple[dict, List[dict]]:
         "prompt_text":  text,
         "prompt_chars": chars,
         "tool_calls_json": None,
+        "source":       source,
         **_usage(rec),
     }
     tools = _extract_tools(rec)
@@ -158,7 +186,152 @@ def parse_record(rec: dict, project_slug: str) -> Tuple[dict, List[dict]]:
         t["message_uuid"] = msg["uuid"]
         t["session_id"]   = msg["session_id"]
         t["project_slug"] = project_slug
+        t["source"]       = source
     return msg, tools
+
+
+def _slug_from_cwd(cwd: Optional[str], fallback: str) -> str:
+    if not cwd:
+        return fallback
+    return cwd.replace(":", "-").replace("\\", "-").replace("/", "-").replace(" ", "-")
+
+
+def _codex_usage(payload: dict) -> dict:
+    usage = ((payload.get("info") or {}).get("last_token_usage") or {})
+    input_tokens = int(usage.get("input_tokens") or 0)
+    cached_tokens = int(usage.get("cached_input_tokens") or 0)
+    return {
+        "input_tokens": max(0, input_tokens - cached_tokens),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_tokens": cached_tokens,
+        "cache_create_5m_tokens": 0,
+        "cache_create_1h_tokens": 0,
+    }
+
+
+def parse_codex_record(rec: dict, fallback_slug: str, context: dict, offset: int) -> Tuple[Optional[dict], List[dict]]:
+    """Normalize a Codex session JSONL record into the shared row shape.
+
+    Codex records are event-oriented. User prompt text appears on
+    ``event_msg/user_message`` records, function calls appear on
+    ``response_item/function_call`` records, and token usage appears on
+    ``event_msg/token_count`` records.
+    """
+    payload = rec.get("payload") or {}
+    timestamp = rec.get("timestamp") or payload.get("timestamp")
+    top_type = rec.get("type")
+    payload_type = payload.get("type")
+
+    if top_type == "session_meta":
+        context["session_id"] = payload.get("session_id") or payload.get("id") or context.get("session_id")
+        context["cwd"] = payload.get("cwd") or context.get("cwd")
+        context["version"] = payload.get("cli_version") or context.get("version")
+        return None, []
+
+    if top_type == "turn_context":
+        context["turn_id"] = payload.get("turn_id") or context.get("turn_id")
+        context["cwd"] = payload.get("cwd") or context.get("cwd")
+        context["model"] = payload.get("model") or context.get("model")
+        return None, []
+
+    session_id = context.get("session_id")
+    project_slug = _slug_from_cwd(context.get("cwd"), fallback_slug)
+
+    if top_type == "event_msg" and payload_type == "user_message":
+        text = payload.get("message")
+        if not isinstance(text, str):
+            text = None
+        uid = f"codex:{session_id or 'unknown'}:{offset}:user"
+        context["last_user_uuid"] = uid
+        msg = {
+            "uuid": uid,
+            "parent_uuid": None,
+            "session_id": session_id,
+            "project_slug": project_slug,
+            "cwd": context.get("cwd"),
+            "git_branch": None,
+            "cc_version": context.get("version"),
+            "entrypoint": "codex",
+            "type": "user",
+            "is_sidechain": 0,
+            "agent_id": None,
+            "timestamp": timestamp,
+            "model": None,
+            "stop_reason": None,
+            "prompt_id": context.get("turn_id"),
+            "message_id": uid,
+            "prompt_text": text,
+            "prompt_chars": len(text) if text else None,
+            "tool_calls_json": None,
+            "source": "codex",
+            **_empty_usage(),
+        }
+        return msg, []
+
+    if top_type == "response_item" and payload_type == "function_call":
+        name = payload.get("name") or "unknown"
+        namespace = payload.get("namespace")
+        tool_name = f"{namespace}.{name}" if namespace else name
+        context.setdefault("pending_tools", []).append({
+            "tool_name": tool_name,
+            "target": _codex_target(name, payload.get("arguments")),
+            "result_tokens": None,
+            "is_error": 0,
+            "timestamp": timestamp,
+            "source": "codex",
+        })
+        return None, []
+
+    if top_type == "response_item" and payload_type == "function_call_output":
+        body = payload.get("output")
+        chars = len(body) if isinstance(body, str) else 0
+        context.setdefault("pending_tools", []).append({
+            "tool_name": "_tool_result",
+            "target": payload.get("call_id"),
+            "result_tokens": chars // 4,
+            "is_error": 0 if payload.get("status") != "failed" else 1,
+            "timestamp": timestamp,
+            "source": "codex",
+        })
+        return None, []
+
+    if top_type == "event_msg" and payload_type == "token_count":
+        uid = f"codex:{session_id or 'unknown'}:{offset}:assistant"
+        tools = context.pop("pending_tools", [])
+        msg = {
+            "uuid": uid,
+            "parent_uuid": context.get("last_user_uuid"),
+            "session_id": session_id,
+            "project_slug": project_slug,
+            "cwd": context.get("cwd"),
+            "git_branch": None,
+            "cc_version": context.get("version"),
+            "entrypoint": "codex",
+            "type": "assistant",
+            "is_sidechain": 0,
+            "agent_id": None,
+            "timestamp": timestamp,
+            "model": context.get("model"),
+            "stop_reason": None,
+            "prompt_id": context.get("turn_id"),
+            "message_id": uid,
+            "prompt_text": None,
+            "prompt_chars": None,
+            "tool_calls_json": None,
+            "source": "codex",
+            **_codex_usage(payload),
+        }
+        if tools:
+            msg["tool_calls_json"] = json.dumps(
+                [{"name": t["tool_name"], "target": t["target"]} for t in tools if t["tool_name"] != "_tool_result"]
+            )
+        for t in tools:
+            t["message_uuid"] = msg["uuid"]
+            t["session_id"] = session_id
+            t["project_slug"] = project_slug
+        return msg, tools
+
+    return None, []
 
 
 def _project_slug(file_path: Path, projects_root: Path) -> str:
@@ -184,7 +357,7 @@ def _evict_prior_snapshots(conn, session_id: str, message_id: str, keep_uuid: st
     conn.execute(f"DELETE FROM messages WHERE uuid IN ({placeholders})", old)
 
 
-def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
+def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0, source: str = "claude") -> dict:
     """Ingest new lines from a JSONL file starting at ``start_byte``.
 
     Returns message/tool counts plus ``end_offset`` — the byte offset just
@@ -194,6 +367,7 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
     """
     msgs = tools = 0
     end_offset = start_byte
+    context = {}
     with open(path, "rb") as fb:
         if start_byte:
             fb.seek(start_byte)
@@ -220,13 +394,23 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             except json.JSONDecodeError:
                 end_offset = line_end
                 continue
-            if not isinstance(rec, dict) or "uuid" not in rec or "type" not in rec:
+            if not isinstance(rec, dict) or "type" not in rec:
                 end_offset = line_end
                 continue
-            msg, tlist = parse_record(rec, project_slug)
+            if source == "codex":
+                msg, tlist = parse_codex_record(rec, project_slug, context, line_end)
+            else:
+                if "uuid" not in rec:
+                    end_offset = line_end
+                    continue
+                msg, tlist = parse_record(rec, project_slug, source=source)
+            if not msg:
+                end_offset = line_end
+                continue
             if not msg["session_id"] or not msg["timestamp"]:
                 end_offset = line_end
                 continue
+            existed = conn.execute("SELECT 1 FROM messages WHERE uuid=?", (msg["uuid"],)).fetchone() is not None
             if msg["message_id"]:
                 _evict_prior_snapshots(conn, msg["session_id"], msg["message_id"], msg["uuid"])
             conn.execute(INSERT_MSG, msg)
@@ -236,13 +420,15 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             conn.execute("DELETE FROM tool_calls WHERE message_uuid=?", (msg["uuid"],))
             for t in tlist:
                 conn.execute(INSERT_TOOL, t)
-                tools += 1
-            msgs += 1
+                if not existed:
+                    tools += 1
+            if not existed:
+                msgs += 1
             end_offset = line_end
     return {"messages": msgs, "tools": tools, "end_offset": end_offset}
 
 
-def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict:
+def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path], source: str = "claude") -> dict:
     root = Path(projects_root)
     totals = {"messages": 0, "tools": 0, "files": 0}
     if not root.is_dir():
@@ -254,21 +440,26 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
             except OSError:
                 continue
             row = conn.execute(
-                "SELECT mtime, bytes_read FROM files WHERE path=?", (str(p),)
+                "SELECT mtime, bytes_read FROM files WHERE source=? AND path=?", (source, str(p))
             ).fetchone()
             offset = 0
             if row and row["mtime"] == stat.st_mtime and row["bytes_read"] == stat.st_size:
                 continue
             if row and stat.st_size > row["bytes_read"]:
                 offset = row["bytes_read"]
+            if source == "codex":
+                # Codex records depend on earlier session_meta/turn_context
+                # lines for session id, cwd, and model. Replaying changed files
+                # is idempotent because message uuids are deterministic.
+                offset = 0
             slug = _project_slug(p, root)
-            sub = scan_file(p, slug, conn, start_byte=offset)
+            sub = scan_file(p, slug, conn, start_byte=offset, source=source)
             # Persist the byte offset of the last fully-parsed line (not
             # st_size) so a partial line mid-flush is retried on the next
             # scan instead of being skipped over.
             conn.execute(
-                "INSERT OR REPLACE INTO files (path, mtime, bytes_read, scanned_at) VALUES (?, ?, ?, ?)",
-                (str(p), stat.st_mtime, sub["end_offset"], time.time()),
+                "INSERT OR REPLACE INTO files (source, path, mtime, bytes_read, scanned_at) VALUES (?, ?, ?, ?, ?)",
+                (source, str(p), stat.st_mtime, sub["end_offset"], time.time()),
             )
             totals["messages"] += sub["messages"]
             totals["tools"]    += sub["tools"]

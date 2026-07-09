@@ -17,6 +17,11 @@ function writeSort(key) {
   location.hash = '#' + base + '?sort=' + encodeURIComponent(key);
 }
 
+function sessionHref(row) {
+  const suffix = row.source ? `?source=${encodeURIComponent(row.source)}` : '';
+  return `#/sessions/${encodeURIComponent(row.session_id)}${suffix}`;
+}
+
 export default async function (root) {
   const sort = readSort();
   const rows = await api('/api/prompts?limit=100&sort=' + encodeURIComponent(sort.key));
@@ -56,7 +61,7 @@ export default async function (root) {
               <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
               <td class="num">${fmt.int(r.billable_tokens)}</td>
               <td class="num">${fmt.int(r.cache_read_tokens)}</td>
-              <td><a href="#/sessions/${encodeURIComponent(r.session_id)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(r.session_id.slice(0,8))}…</a></td>
+              <td><a href="${sessionHref(r)}" class="mono" onclick="event.stopPropagation()">${r.source ? `<span class="badge">${fmt.htmlSafe(r.source)}</span> ` : ''}${fmt.htmlSafe(r.session_id.slice(0,8))}…</a></td>
             </tr>`).join('') || '<tr><td colspan="6" class="muted">no prompts yet</td></tr>'}
         </tbody>
       </table>
@@ -67,7 +72,6 @@ export default async function (root) {
   root.querySelectorAll('.range-tabs button').forEach(btn => {
     btn.addEventListener('click', () => writeSort(btn.dataset.sort));
   });
-
   root.querySelectorAll('#prompts tbody tr').forEach(tr => {
     tr.addEventListener('click', () => {
       const r = rows[Number(tr.dataset.i)];
@@ -84,7 +88,7 @@ export default async function (root) {
             <span class="muted">${fmt.ts(r.timestamp)}</span>
             <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ~${fmt.usd4(r.estimated_cost_usd)} cache cost</span>
             <span class="spacer"></span>
-            <a href="#/sessions/${encodeURIComponent(r.session_id)}">Open session →</a>
+            <a href="${sessionHref(r)}">Open session →</a>
           </div>
         </div>`;
       drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
