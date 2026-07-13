@@ -1,5 +1,5 @@
 import { api, fmt } from '/web/app.js';
-import { barChart } from '/web/charts.js';
+import { barChart, CHART } from '/web/charts.js';
 
 const RANGES = [
   { key: '7d',  label: '7d',  days: 7 },
@@ -59,7 +59,7 @@ export default async function (root) {
 
     <div class="card" style="margin-top:16px">
       <h3>All skills</h3>
-      <p class="muted" style="margin:-4px 0 14px;font-size:12px">"Tokens per call" is the size of the skill's <code>SKILL.md</code> file — what Claude Code loads into context each time the skill is invoked.</p>
+      <p class="muted" style="margin:-4px 0 14px;font-size:12px">"Tokens per call" estimates the discovered <code>SKILL.md</code> size across Claude, Codex, and shared agent skill roots.</p>
       <table>
         <thead><tr>
           <th>skill</th>
@@ -90,6 +90,6 @@ export default async function (root) {
   barChart(document.getElementById('ch-skills'), {
     categories: top.map(t => t.skill.length > 26 ? t.skill.slice(0, 25) + '…' : t.skill),
     values: top.map(t => t.invocations),
-    color: '#3FB68B',
+    color: CHART.primary,
   });
 }

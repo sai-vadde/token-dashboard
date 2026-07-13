@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS messages (
   type                    TEXT NOT NULL,
   is_sidechain            INTEGER NOT NULL DEFAULT 0,
   agent_id                TEXT,
+  agent_type              TEXT,
+  agent_name              TEXT,
+  parent_session_id       TEXT,
   timestamp               TEXT NOT NULL,
   model                   TEXT,
   stop_reason             TEXT,
@@ -40,8 +43,12 @@ CREATE TABLE IF NOT EXISTS messages (
   cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
   cache_create_5m_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_create_1h_tokens  INTEGER NOT NULL DEFAULT 0,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  context_window          INTEGER,
   prompt_text             TEXT,
   prompt_chars            INTEGER,
+  response_text           TEXT,
+  source_metadata_json    TEXT,
   tool_calls_json         TEXT,
   source                  TEXT NOT NULL DEFAULT 'claude'
 );
@@ -61,6 +68,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   target        TEXT,
   result_tokens INTEGER,
   is_error      INTEGER NOT NULL DEFAULT 0,
+  call_id       TEXT,
+  tool_kind     TEXT,
   timestamp     TEXT    NOT NULL,
   source        TEXT    NOT NULL DEFAULT 'claude'
 );
@@ -74,10 +83,36 @@ CREATE TABLE IF NOT EXISTS plan (
   v TEXT
 );
 
+CREATE TABLE IF NOT EXISTS platform_settings (
+  source        TEXT PRIMARY KEY,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  configured    INTEGER NOT NULL DEFAULT 0,
+  plan          TEXT NOT NULL DEFAULT 'api',
+  scan_root     TEXT,
+  display_order INTEGER NOT NULL DEFAULT 0,
+  updated_at    REAL
+);
+
 CREATE TABLE IF NOT EXISTS dismissed_tips (
   tip_key       TEXT PRIMARY KEY,
   dismissed_at  REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agents (
+  source       TEXT NOT NULL DEFAULT 'claude',
+  session_id   TEXT NOT NULL,
+  agent_id     TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  agent_type   TEXT,
+  description  TEXT,
+  tool_use_id  TEXT,
+  spawn_depth  INTEGER,
+  parent_session_id TEXT,
+  agent_name   TEXT,
+  PRIMARY KEY (source, session_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(agent_type);
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(source, parent_session_id);
 """
 
 
@@ -88,11 +123,21 @@ def default_db_path() -> Path:
 def init_db(path: Union[str, Path]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as c:
+    c = sqlite3.connect(path)
+    try:
         _migrate_source_file_cursors(c)
         _migrate_add_message_id(c)
         _migrate_add_source(c)
+        _migrate_add_platform_metrics(c)
         c.executescript(SCHEMA)
+        # Provider-owned schemas stay with their pipelines; the global DB
+        # initializer only invokes their explicit setup hooks.
+        from .codex_store import init_codex_schema
+        init_codex_schema(c)
+        from .providers import ensure_platform_rows
+        ensure_platform_rows(c)
+    finally:
+        c.close()
 
 
 def _migrate_add_message_id(conn) -> None:
@@ -178,6 +223,51 @@ def _migrate_source_file_cursors(conn) -> None:
     conn.commit()
 
 
+def _migrate_add_platform_metrics(conn) -> None:
+    """Add canonical extension fields used by Codex and future sources.
+
+    Source-native details stay in ``source_metadata_json`` while metrics that
+    are useful across platforms get typed columns. Clearing file cursors makes
+    the next scan backfill the new fields from the local source transcripts.
+    """
+    additions = {
+        "messages": (
+            ("reasoning_output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("context_window", "INTEGER"),
+            ("response_text", "TEXT"),
+            ("source_metadata_json", "TEXT"),
+            ("agent_type", "TEXT"),
+            ("agent_name", "TEXT"),
+            ("parent_session_id", "TEXT"),
+        ),
+        "tool_calls": (
+            ("call_id", "TEXT"),
+            ("tool_kind", "TEXT"),
+        ),
+        "agents": (
+            ("parent_session_id", "TEXT"),
+            ("agent_name", "TEXT"),
+        ),
+    }
+    changed = False
+    for table, columns in additions.items():
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        current = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, declaration in columns:
+            if name not in current:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                changed = True
+    if changed and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+    ).fetchone():
+        conn.execute("DELETE FROM files")
+    conn.commit()
+
+
 @contextmanager
 def connect(path: Union[str, Path]):
     conn = sqlite3.connect(path)
@@ -195,7 +285,14 @@ def _range_clause(since, until, col: str = "timestamp", source: Optional[str] = 
         where.append(f"{col} >= ?"); args.append(since)
     if until:
         where.append(f"{col} < ?"); args.append(until)
-    if source:
+    if isinstance(source, (list, tuple, set)):
+        values = [str(value) for value in source if value]
+        if values:
+            where.append(f"{source_col} IN ({','.join('?' for _ in values)})")
+            args.extend(values)
+        else:
+            where.append("1=0")
+    elif source:
         where.append(f"{source_col} = ?"); args.append(source)
     return ((" AND " + " AND ".join(where)) if where else "", args)
 
@@ -265,7 +362,12 @@ def overview_totals(db_path, since=None, until=None, source=None) -> dict:
              COALESCE(SUM(output_tokens),0)           AS output_tokens,
              COALESCE(SUM(cache_read_tokens),0)       AS cache_read_tokens,
              COALESCE(SUM(cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
-             COALESCE(SUM(cache_create_1h_tokens),0)  AS cache_create_1h_tokens
+             COALESCE(SUM(cache_create_1h_tokens),0)  AS cache_create_1h_tokens,
+             COALESCE(SUM(reasoning_output_tokens),0) AS reasoning_output_tokens,
+             COUNT(CASE WHEN type='assistant' THEN 1 END) AS model_calls,
+             COALESCE(MAX(CASE WHEN context_window > 0
+               THEN 1.0 * (input_tokens + cache_read_tokens) / context_window END), 0)
+               AS peak_context_utilization
         FROM messages WHERE 1=1 {rng}
     """
     with connect(db_path) as c:
@@ -279,23 +381,34 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", source=Non
     sort="recent"           → newest first.
     """
     order = "u.timestamp DESC" if sort == "recent" else "billable_tokens DESC"
+    user_source, user_args = _range_clause(None, None, source=source, source_col="u.source")
+    assistant_source, assistant_args = _range_clause(None, None, source=source, source_col="a.source")
     sql = f"""
-      SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.source, u.timestamp,
-             u.prompt_text, u.prompt_chars,
-             a.uuid AS assistant_uuid, a.model,
-             COALESCE(a.input_tokens,0)+COALESCE(a.output_tokens,0)
-               +COALESCE(a.cache_create_5m_tokens,0)+COALESCE(a.cache_create_1h_tokens,0) AS billable_tokens,
-             COALESCE(a.cache_read_tokens,0) AS cache_read_tokens
+       SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.source, u.timestamp,
+              u.prompt_text, u.prompt_chars,
+              MIN(a.uuid) AS assistant_uuid,
+              GROUP_CONCAT(DISTINCT a.model) AS model,
+              COUNT(a.uuid) AS model_calls,
+              COALESCE(SUM(a.input_tokens),0) AS input_tokens,
+              COALESCE(SUM(a.output_tokens),0) AS output_tokens,
+              COALESCE(SUM(a.cache_create_5m_tokens),0) AS cache_create_5m_tokens,
+              COALESCE(SUM(a.cache_create_1h_tokens),0) AS cache_create_1h_tokens,
+              COALESCE(SUM(a.input_tokens),0)+COALESCE(SUM(a.output_tokens),0)
+               +COALESCE(SUM(a.cache_create_5m_tokens),0)+COALESCE(SUM(a.cache_create_1h_tokens),0) AS billable_tokens,
+              COALESCE(SUM(a.cache_read_tokens),0) AS cache_read_tokens,
+              COALESCE(SUM(a.reasoning_output_tokens),0) AS reasoning_output_tokens,
+              GROUP_CONCAT(NULLIF(a.response_text, ''), '\n') AS response_text
         FROM messages u
         JOIN messages a ON a.parent_uuid = u.uuid AND a.type='assistant'
        WHERE u.type='user' AND u.prompt_text IS NOT NULL
-         AND (? IS NULL OR u.source = ?)
-         AND (? IS NULL OR a.source = ?)
+         {user_source} {assistant_source}
+       GROUP BY u.uuid, u.session_id, u.project_slug, u.source, u.timestamp,
+                u.prompt_text, u.prompt_chars
        ORDER BY {order}
        LIMIT ?
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (source, source, source, source, limit))]
+        return [dict(r) for r in c.execute(sql, (*user_args, *assistant_args, limit))]
 
 
 def project_summary(db_path, since=None, until=None, source=None) -> list:
@@ -316,10 +429,11 @@ def project_summary(db_path, since=None, until=None, source=None) -> list:
     """
     with connect(db_path) as c:
         rows = [dict(r) for r in c.execute(sql, args)]
+        cwd_source, cwd_args = _range_clause(None, None, source=source)
         for r in rows:
             cwds = [row["cwd"] for row in c.execute(
-                "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL AND (? IS NULL OR source=?)",
-                (r["project_slug"], source, source),
+                f"SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL {cwd_source}",
+                (r["project_slug"], *cwd_args),
             )]
             r["project_name"] = best_project_name(cwds, r["project_slug"])
     return rows
@@ -330,10 +444,12 @@ def tool_token_breakdown(db_path, since=None, until=None, source=None) -> list:
     sql = f"""
       SELECT tool_name,
              COUNT(*) AS calls,
-             COALESCE(SUM(result_tokens),0) AS result_tokens
+             COALESCE(SUM(result_tokens),0) AS result_tokens,
+             SUM(CASE WHEN is_error=1 THEN 1 ELSE 0 END) AS errors,
+             COALESCE(tool_kind, 'other') AS tool_kind
         FROM tool_calls
        WHERE tool_name != '_tool_result' {rng}
-       GROUP BY tool_name
+       GROUP BY tool_name, COALESCE(tool_kind, 'other')
        ORDER BY calls DESC
     """
     with connect(db_path) as c:
@@ -346,7 +462,12 @@ def recent_sessions(db_path, limit: int = 20, since=None, until=None, source=Non
       SELECT source, session_id, project_slug,
              MIN(timestamp) AS started, MAX(timestamp) AS ended,
              SUM(CASE WHEN type='user' THEN 1 ELSE 0 END) AS turns,
-             SUM(input_tokens)+SUM(output_tokens) AS tokens
+             SUM(input_tokens)+SUM(output_tokens) AS tokens,
+             SUM(reasoning_output_tokens) AS reasoning_output_tokens,
+             COUNT(CASE WHEN type='assistant' THEN 1 END) AS model_calls,
+             COALESCE(MAX(CASE WHEN context_window > 0
+               THEN 1.0 * (input_tokens + cache_read_tokens) / context_window END), 0)
+               AS peak_context_utilization
         FROM messages m
        WHERE 1=1 {rng}
        GROUP BY source, session_id
@@ -361,27 +482,34 @@ def recent_sessions(db_path, limit: int = 20, since=None, until=None, source=Non
             slug = r["project_slug"]
             cache_key = (r["source"], slug)
             if cache_key not in slug_cache:
+                # Each grouped row already carries a single concrete source, so
+                # scope the name lookup to that row's source. Using the request
+                # `source` directly would bind a list here when source="all".
                 cwds = [row["cwd"] for row in c.execute(
-                    "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL AND (? IS NULL OR source=?)",
-                    (slug, source or r["source"], source or r["source"]),
+                    "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL AND source=?",
+                    (slug, r["source"]),
                 )]
                 slug_cache[cache_key] = best_project_name(cwds, slug)
             r["project_name"] = slug_cache[cache_key]
     return rows
 
 
-def session_turns(db_path, session_id: str, source=None) -> list:
+def session_turns(db_path, session_id: str, source=None, agent_id=None) -> list:
     sql = """
       SELECT uuid, parent_uuid, type, timestamp, model, is_sidechain, agent_id,
+             agent_type, agent_name, parent_session_id,
              input_tokens, output_tokens, cache_read_tokens,
-             cache_create_5m_tokens, cache_create_1h_tokens,
-             prompt_text, prompt_chars, tool_calls_json, project_slug, cwd, source
+              cache_create_5m_tokens, cache_create_1h_tokens,
+              reasoning_output_tokens, context_window,
+              prompt_text, prompt_chars, response_text, source_metadata_json,
+              tool_calls_json, project_slug, cwd, source
         FROM messages
        WHERE session_id = ? AND (? IS NULL OR source = ?)
+         AND (? IS NULL OR agent_id = ?)
        ORDER BY timestamp ASC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (session_id, source, source))]
+        return [dict(r) for r in c.execute(sql, (session_id, source, source, agent_id, agent_id))]
 
 
 def daily_token_breakdown(db_path, since=None, until=None, source=None) -> list:
@@ -393,7 +521,8 @@ def daily_token_breakdown(db_path, since=None, until=None, source=None) -> list:
              COALESCE(SUM(output_tokens),0)     AS output_tokens,
              COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
              COALESCE(SUM(cache_create_5m_tokens),0)
-               + COALESCE(SUM(cache_create_1h_tokens),0) AS cache_create_tokens
+               + COALESCE(SUM(cache_create_1h_tokens),0) AS cache_create_tokens,
+             COALESCE(SUM(reasoning_output_tokens),0) AS reasoning_output_tokens
         FROM messages
        WHERE timestamp IS NOT NULL {rng}
        GROUP BY day
@@ -429,40 +558,159 @@ def skill_breakdown(db_path, since=None, until=None, source=None) -> list:
         return [dict(r) for r in c.execute(sql, args)]
 
 
+def agent_breakdown(db_path, since=None, until=None, source=None) -> list:
+    """Per-agent-role usage for Claude sidecars and Codex child threads."""
+    rng, args = _range_clause(since, until, source=source)
+    sql = f"""
+      WITH attributed AS (
+        SELECT COALESCE(a.agent_type, a.agent_name, '(unknown)') AS agent_type, m.*
+          FROM agents a
+          JOIN messages m ON m.source=a.source AND m.session_id=a.session_id AND m.agent_id=a.agent_id
+        UNION ALL
+        SELECT COALESCE(m.agent_type, m.agent_name, m.agent_id, '(unknown)') AS agent_type, m.*
+          FROM messages m
+         WHERE m.is_sidechain=1
+           AND NOT EXISTS (
+             SELECT 1 FROM agents a
+              WHERE a.source=m.source AND a.session_id=m.session_id AND a.agent_id=m.agent_id
+           )
+      )
+      SELECT agent_type,
+             COALESCE(model, 'unknown') AS model,
+             COUNT(DISTINCT source || ':' || session_id || ':' || COALESCE(agent_id,'')) AS runs,
+             COUNT(DISTINCT source || ':' || session_id) AS sessions,
+             COALESCE(SUM(input_tokens),0)           AS input_tokens,
+             COALESCE(SUM(output_tokens),0)          AS output_tokens,
+             COALESCE(SUM(cache_read_tokens),0)      AS cache_read_tokens,
+             COALESCE(SUM(cache_create_5m_tokens),0) AS cache_create_5m_tokens,
+             COALESCE(SUM(cache_create_1h_tokens),0) AS cache_create_1h_tokens,
+             COALESCE(SUM(reasoning_output_tokens),0) AS reasoning_output_tokens,
+             COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens
+               + cache_create_5m_tokens + cache_create_1h_tokens),0) AS total_tokens,
+             MAX(timestamp) AS last_used
+        FROM attributed
+       WHERE model IS NOT NULL {rng}
+       GROUP BY agent_type, model
+       ORDER BY (SUM(input_tokens) + SUM(output_tokens) + SUM(cache_read_tokens)
+                 + SUM(cache_create_5m_tokens) + SUM(cache_create_1h_tokens)) DESC
+    """
+    with connect(db_path) as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def agent_run_breakdown(db_path, since=None, until=None, source=None) -> list:
+    """Token totals for every individual agent identity, split by model."""
+    rng, args = _range_clause(
+        since, until, col="m.timestamp", source=source, source_col="m.source"
+    )
+    sql = f"""
+      WITH identities AS (
+        SELECT source, session_id, agent_id, project_slug, agent_type, agent_name,
+               parent_session_id, description, spawn_depth
+          FROM agents
+        UNION ALL
+        SELECT DISTINCT m.source, m.session_id, m.agent_id, m.project_slug,
+               m.agent_type, m.agent_name, m.parent_session_id, NULL, NULL
+          FROM messages m
+         WHERE m.is_sidechain=1 AND m.agent_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM agents a
+              WHERE a.source=m.source AND a.session_id=m.session_id AND a.agent_id=m.agent_id
+           )
+      )
+      SELECT a.source, a.session_id, a.agent_id,
+             COALESCE(a.agent_type, a.agent_name, '(unknown)') AS agent_type,
+             a.agent_name, a.parent_session_id, a.description, a.spawn_depth,
+             m.project_slug, COALESCE(m.model, 'unknown') AS model,
+             MIN(m.timestamp) AS started, MAX(m.timestamp) AS ended,
+             COUNT(*) AS model_calls,
+             COALESCE(SUM(m.input_tokens),0) AS input_tokens,
+             COALESCE(SUM(m.output_tokens),0) AS output_tokens,
+             COALESCE(SUM(m.cache_read_tokens),0) AS cache_read_tokens,
+             COALESCE(SUM(m.cache_create_5m_tokens),0) AS cache_create_5m_tokens,
+             COALESCE(SUM(m.cache_create_1h_tokens),0) AS cache_create_1h_tokens,
+             COALESCE(SUM(m.reasoning_output_tokens),0) AS reasoning_output_tokens,
+             COALESCE(SUM(m.input_tokens + m.output_tokens + m.cache_read_tokens
+               + m.cache_create_5m_tokens + m.cache_create_1h_tokens),0) AS total_tokens,
+             COALESCE(MAX(CASE WHEN m.context_window > 0
+               THEN 1.0 * (m.input_tokens + m.cache_read_tokens) / m.context_window END), 0)
+               AS peak_context_utilization
+        FROM identities a
+        JOIN messages m
+          ON m.source=a.source AND m.session_id=a.session_id AND m.agent_id=a.agent_id
+       WHERE m.type='assistant' {rng}
+       GROUP BY a.source, a.session_id, a.agent_id, a.agent_type, a.agent_name,
+                a.parent_session_id, a.description, a.spawn_depth, m.project_slug, m.model
+       ORDER BY ended DESC
+    """
+    with connect(db_path) as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
 def model_breakdown(db_path, since=None, until=None, source=None) -> list:
     """Per-model token totals + turn count. Caller computes cost via pricing."""
     rng, args = _range_clause(since, until, source=source)
     sql = f"""
-      SELECT COALESCE(model, 'unknown') AS model,
+      SELECT source, COALESCE(model, 'unknown') AS model,
              COUNT(*) AS turns,
              COALESCE(SUM(input_tokens),0)            AS input_tokens,
              COALESCE(SUM(output_tokens),0)           AS output_tokens,
              COALESCE(SUM(cache_read_tokens),0)       AS cache_read_tokens,
              COALESCE(SUM(cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
              COALESCE(SUM(cache_create_1h_tokens),0)  AS cache_create_1h_tokens
+             ,COALESCE(SUM(reasoning_output_tokens),0) AS reasoning_output_tokens
+             ,COALESCE(MAX(CASE WHEN context_window > 0
+               THEN 1.0 * (input_tokens + cache_read_tokens) / context_window END), 0)
+               AS peak_context_utilization
         FROM messages
        WHERE type = 'assistant' {rng}
-       GROUP BY model
+       GROUP BY source, model
        ORDER BY (input_tokens + output_tokens + cache_create_5m_tokens + cache_create_1h_tokens) DESC
     """
     with connect(db_path) as c:
         return [dict(r) for r in c.execute(sql, args)]
 
 
-def source_summary(db_path, since=None, until=None) -> list:
-    rng, args = _range_clause(since, until)
+def source_summary(db_path, since=None, until=None, source=None) -> list:
+    rng, args = _range_clause(since, until, col="m.timestamp", source=source, source_col="m.source")
+    tool_rng, tool_args = _range_clause(since, until, source=source)
     sql = f"""
-      SELECT source,
-             COUNT(DISTINCT source || ':' || session_id) AS sessions,
-             SUM(CASE WHEN type='user' THEN 1 ELSE 0 END) AS turns,
+      WITH tool_stats AS (
+        SELECT source, COUNT(*) AS tool_calls,
+               SUM(CASE WHEN is_error=1 THEN 1 ELSE 0 END) AS tool_errors
+          FROM tool_calls
+         WHERE 1=1 {tool_rng}
+         GROUP BY source
+      )
+      SELECT m.source,
+             COUNT(DISTINCT m.source || ':' || m.session_id) AS sessions,
+             SUM(CASE WHEN m.type='user' THEN 1 ELSE 0 END) AS turns,
+             COALESCE(SUM(input_tokens),0) AS input_tokens,
+             COALESCE(SUM(output_tokens),0) AS output_tokens,
+             COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+             COALESCE(SUM(cache_create_5m_tokens),0) AS cache_create_5m_tokens,
+             COALESCE(SUM(cache_create_1h_tokens),0) AS cache_create_1h_tokens,
+             SUM(CASE WHEN m.type='assistant' AND cache_read_tokens > 0 THEN 1 ELSE 0 END)
+               AS cache_read_events,
+             SUM(CASE WHEN m.type='assistant' AND
+               (cache_create_5m_tokens > 0 OR cache_create_1h_tokens > 0) THEN 1 ELSE 0 END)
+               AS cache_create_events,
              COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)
                + COALESCE(SUM(cache_read_tokens),0)
                + COALESCE(SUM(cache_create_5m_tokens),0)
-               + COALESCE(SUM(cache_create_1h_tokens),0) AS tokens
-        FROM messages
+               + COALESCE(SUM(cache_create_1h_tokens),0) AS tokens,
+             COALESCE(SUM(reasoning_output_tokens),0) AS reasoning_output_tokens,
+             COUNT(CASE WHEN type='assistant' THEN 1 END) AS model_calls,
+             COALESCE(MAX(CASE WHEN context_window > 0
+               THEN 1.0 * (input_tokens + cache_read_tokens) / context_window END), 0)
+               AS peak_context_utilization,
+             COALESCE(MAX(ts.tool_calls),0) AS tool_calls,
+             COALESCE(MAX(ts.tool_errors),0) AS tool_errors
+        FROM messages m
+        LEFT JOIN tool_stats ts ON ts.source=m.source
        WHERE 1=1 {rng}
-       GROUP BY source
-       ORDER BY source ASC
+       GROUP BY m.source
+       ORDER BY m.source ASC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        return [dict(r) for r in c.execute(sql, (*tool_args, *args))]

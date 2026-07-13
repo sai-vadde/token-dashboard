@@ -1,5 +1,5 @@
 import { api, fmt, state } from '/web/app.js';
-import { barChart, donutChart, groupedBarChart, stackedBarChart } from '/web/charts.js';
+import { barChart, donutChart, groupedBarChart, stackedBarChart, CHART } from '/web/charts.js';
 
 const RANGES = [
   { key: '7d',  label: '7d',  days: 7 },
@@ -34,18 +34,34 @@ export default async function (root) {
   const range = readRange();
   const since = sinceIso(range);
 
-  const [totals, projects, sessions, tools, daily, byModel] = await Promise.all([
+  const [totals, projects, sessions, tools, daily, byModel, sources, platformData] = await Promise.all([
     api(withSince('/api/overview', since)),
     api(withSince('/api/projects', since)),
     api(withSince('/api/sessions?limit=10', since)),
     api(withSince('/api/tools', since)),
     api(withSince('/api/daily', since)),
     api(withSince('/api/by-model', since)),
+    api(withSince('/api/sources', since)),
+    api(withSince('/api/platforms', since)),
   ]);
 
   const cacheCreate =
     (totals.cache_create_5m_tokens || 0) +
     (totals.cache_create_1h_tokens || 0);
+  const contextPeak = totals.peak_context_utilization || 0;
+  const selectedPlatform = platformData.platforms.find(p => p.source === state.source);
+  const scopeSummary = state.source === 'all' ? platformData.all : selectedPlatform;
+  const financial = scopeSummary?.financial || totals.financial || {};
+  const cacheSummary = scopeSummary?.cache || {};
+  const cacheCreateKnown = state.source === 'all'
+    ? cacheSummary.create_telemetry_complete
+    : selectedPlatform?.capabilities?.cache_create === 'reported';
+  const subscriptionUsd = state.source === 'all'
+    ? scopeSummary?.monthly_subscriptions_usd
+    : selectedPlatform?.subscription_usd;
+  const cacheCreateDisplay = cacheCreateKnown
+    ? fmt.compact(cacheCreate)
+    : state.source === 'all' && cacheCreate > 0 ? `${fmt.compact(cacheCreate)}*` : '—';
 
   const kpi = (label, compactVal, fullVal, cls = '') => `
     <div class="card kpi ${cls}">
@@ -58,6 +74,23 @@ export default async function (root) {
       ${RANGES.map(r => `<button data-range="${r.key}" class="${r.key === range.key ? 'active' : ''}">${r.label}</button>`).join('')}
     </div>`;
 
+  const sourceComparison = state.source === 'all' && sources.length > 1 ? `
+    <div class="card" style="margin-top:16px">
+      <h3>Platform comparison</h3>
+      <p class="muted" style="margin:-4px 0 10px;font-size:12px">Shared metrics stay comparable; provider-native metrics appear when the transcript exposes them.</p>
+      <table>
+        <thead><tr><th>source</th><th class="num">sessions</th><th class="num">tokens</th><th class="num">API equiv.</th><th class="num">cache saved</th><th class="num">cache writes</th><th class="num">tools</th></tr></thead>
+        <tbody>${sources.map(s => `<tr>
+          <td><span class="badge">${fmt.htmlSafe(s.source)}</span></td>
+          <td class="num">${fmt.int(s.sessions)}</td><td class="num">${fmt.int(s.tokens)}</td>
+          <td class="num">${s.financial?.is_lower_bound ? '≥' : ''}${fmt.usd(s.financial?.api_equivalent_usd)}</td>
+          <td class="num">${fmt.usd(s.cache?.savings_usd)}</td>
+          <td class="num">${s.cache?.create_tokens == null ? 'not reported' : fmt.int(s.cache.create_tokens)}</td>
+          <td class="num">${fmt.int(s.tool_calls)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>` : '';
+
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Overview</h2>
@@ -66,18 +99,23 @@ export default async function (root) {
       ${rangeTabs}
     </div>
 
-    <div class="row cols-7">
+    <div class="row metrics-grid">
       ${kpi('Sessions',     fmt.int(totals.sessions),       fmt.int(totals.sessions))}
       ${kpi('Turns',        fmt.int(totals.turns),          fmt.int(totals.turns))}
+      ${kpi('Model calls',  fmt.int(totals.model_calls),    fmt.int(totals.model_calls))}
       ${kpi('Input',        fmt.compact(totals.input_tokens),       fmt.int(totals.input_tokens) + ' tokens')}
       ${kpi('Output',       fmt.compact(totals.output_tokens),      fmt.int(totals.output_tokens) + ' tokens')}
       ${kpi('Cache read',   fmt.compact(totals.cache_read_tokens),  fmt.int(totals.cache_read_tokens) + ' tokens')}
-      ${kpi('Cache create', fmt.compact(cacheCreate),               fmt.int(cacheCreate) + ' tokens')}
+      ${kpi('Explicit cache writes', cacheCreateDisplay, cacheCreateKnown ? fmt.int(cacheCreate) + ' reported tokens' : state.source === 'all' ? 'Partial total: at least one enabled provider does not report cache writes' : 'This provider does not report cache-write events')}
+      ${kpi('Cache savings', fmt.usd(cacheSummary.savings_usd), 'Estimated savings versus uncached input pricing')}
+      ${kpi('Reasoning',    fmt.compact(totals.reasoning_output_tokens), fmt.int(totals.reasoning_output_tokens) + ' output tokens')}
+      ${kpi('Peak context', fmt.pct(contextPeak), fmt.pct(contextPeak) + ' of the context window')}
       <div class="card kpi cost">
-        <div class="label">Est. cost</div>
-        <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
-        ${planSubtitle()}
+        <div class="label">API-equivalent cost</div>
+        <div class="value" title="${fmt.pct(financial.pricing_coverage)} of model calls priced">${financial.is_lower_bound && financial.api_equivalent_usd != null ? '≥' : ''}${fmt.usd(financial.api_equivalent_usd)}</div>
+        <div class="sub">${fmt.pct(financial.pricing_coverage)} pricing coverage</div>
       </div>
+      ${kpi('Monthly plans', fmt.usd(subscriptionUsd), 'Configured subscription commitment; separate from token usage')}
     </div>
 
     <details class="card glossary" style="margin-top:16px">
@@ -87,11 +125,15 @@ export default async function (root) {
         <dt>Turn</dt><dd>One message you sent to the assistant. Each turn can trigger one or more model responses and tool calls.</dd>
         <dt>Input tokens</dt><dd>The new text you and tool results sent to the model this turn. Billed at the input rate when pricing is known.</dd>
         <dt>Output tokens</dt><dd>The text the model wrote back. Usually the biggest cost driver per turn.</dd>
+        <dt>Reasoning tokens</dt><dd>Provider-reported internal reasoning output. Codex exposes this as part of output; sources that do not report it show zero.</dd>
+        <dt>Peak context</dt><dd>The fullest model request: new input plus cached input divided by the provider-reported context window.</dd>
         <dt>Cache read</dt><dd>Tokens the model re-used from a cache, such as instructions, previously-read files, or conversation context. High cache-read counts usually mean better cost hygiene.</dd>
-        <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
-        <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
+        <dt>Cache write</dt><dd>A provider-reported cache creation. Claude exposes write buckets; current Codex token events expose reads but not writes, so Codex shows unavailable instead of a false zero.</dd>
+        <dt>API equivalent</dt><dd>A token-rate estimate for comparing workloads. It is not the same as a ChatGPT or Claude subscription charge. Unknown models reduce the displayed pricing coverage.</dd>
       </dl>
     </details>
+
+    ${sourceComparison}
 
     <div class="row cols-2" style="margin-top:16px">
       <div class="card">
@@ -143,9 +185,9 @@ export default async function (root) {
   stackedBarChart(document.getElementById('ch-daily-billable'), {
     categories: daily.map(d => d.day),
     series: [
-      { name: 'input',        values: daily.map(d => d.input_tokens),        color: '#4A9EFF' },
-      { name: 'output',       values: daily.map(d => d.output_tokens),       color: '#7C5CFF' },
-      { name: 'cache create', values: daily.map(d => d.cache_create_tokens), color: '#E8A23B' },
+      { name: 'input',        values: daily.map(d => d.input_tokens),        color: CHART.input },
+      { name: 'output',       values: daily.map(d => d.output_tokens),       color: CHART.output },
+      { name: 'cache create', values: daily.map(d => d.cache_create_tokens), color: CHART.cacheCreate },
     ],
   });
 
@@ -153,7 +195,7 @@ export default async function (root) {
   stackedBarChart(document.getElementById('ch-daily-cache'), {
     categories: daily.map(d => d.day),
     series: [
-      { name: 'cache read', values: daily.map(d => d.cache_read_tokens), color: '#3FB68B' },
+      { name: 'cache read', values: daily.map(d => d.cache_read_tokens), color: CHART.cacheRead },
     ],
   });
 
@@ -174,8 +216,8 @@ export default async function (root) {
       return name.length > 20 ? name.slice(0, 19) + '…' : name;
     }),
     series: [
-      { name: 'input',  values: topProjects.map(p => p.input_tokens  || 0), color: '#4A9EFF' },
-      { name: 'output', values: topProjects.map(p => p.output_tokens || 0), color: '#7C5CFF' },
+      { name: 'input',  values: topProjects.map(p => p.input_tokens  || 0), color: CHART.input },
+      { name: 'output', values: topProjects.map(p => p.output_tokens || 0), color: CHART.output },
     ],
   });
 
@@ -184,13 +226,6 @@ export default async function (root) {
   barChart(document.getElementById('ch-tools'), {
     categories: topTools.map(t => t.tool_name),
     values: topTools.map(t => t.calls),
-    color: '#7C5CFF',
+    color: CHART.primary,
   });
-}
-
-function planSubtitle() {
-  if (!state.pricing || state.plan === 'api') return '';
-  const p = state.pricing.plans[state.plan];
-  if (!p || !p.monthly) return '';
-  return `<div class="sub">pay $${p.monthly}/mo on ${fmt.htmlSafe(p.label)}</div>`;
 }

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sqlite3
@@ -65,8 +66,19 @@ class CodexWalkTests(unittest.TestCase):
         self.assertEqual(n["tools"], 2)
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
-                "SELECT type, source, project_slug, model, input_tokens, cache_read_tokens, output_tokens, prompt_text FROM messages ORDER BY timestamp"
+                "SELECT type, source, project_slug, model, input_tokens, cache_read_tokens, output_tokens, prompt_text, reasoning_output_tokens, context_window, response_text, source_metadata_json FROM messages ORDER BY timestamp"
             ).fetchall()
+            tools = c.execute(
+                "SELECT tool_name, result_tokens, call_id, tool_kind FROM tool_calls ORDER BY id"
+            ).fetchall()
+            turn = c.execute(
+                "SELECT status, duration_ms, time_to_first_token_ms, effort, approval_policy "
+                "FROM codex_turns WHERE session_id='codex-s1' AND turn_id='turn-1'"
+            ).fetchone()
+            rate = c.execute(
+                "SELECT plan_type, primary_used_percent, secondary_used_percent "
+                "FROM codex_rate_limits"
+            ).fetchone()
         self.assertEqual(rows[0][0], "user")
         self.assertEqual(rows[0][1], "codex")
         self.assertEqual(rows[0][7], "Summarize token usage")
@@ -76,6 +88,16 @@ class CodexWalkTests(unittest.TestCase):
         self.assertEqual(rows[1][4], 90)
         self.assertEqual(rows[1][5], 30)
         self.assertEqual(rows[1][6], 40)
+        self.assertEqual(rows[1][8], 5)
+        self.assertEqual(rows[1][9], 258400)
+        self.assertEqual(rows[1][10], "Token usage summarized.")
+        self.assertEqual(json.loads(rows[1][11])["effort"], "high")
+        self.assertEqual([row[0] for row in tools], ["shell_command", "apply_patch"])
+        self.assertEqual([row[2] for row in tools], ["call-1", "call-2"])
+        self.assertEqual([row[3] for row in tools], ["shell", "file"])
+        self.assertTrue(all(row[1] is not None for row in tools))
+        self.assertEqual(turn, ("completed", 6000, 350, "high", "on-request"))
+        self.assertEqual(rate, ("plus", 76.0, 12.0))
 
     def test_codex_full_replay_reports_only_new_rows(self):
         n1 = scan_dir(self.sessions_root, self.db, source="codex")
@@ -93,6 +115,8 @@ class CodexWalkTests(unittest.TestCase):
         with sqlite3.connect(self.db) as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0], 2)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM codex_turns").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM codex_rate_limits").fetchone()[0], 1)
 
     def test_wrong_source_scan_does_not_block_later_codex_scan(self):
         wrong = scan_dir(self.sessions_root, self.db, source="claude")

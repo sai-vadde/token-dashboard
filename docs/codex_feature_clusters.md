@@ -2,6 +2,16 @@
 
 Stored plan for the Codex transcript support work. These clusters describe the implementation shape that should stay coherent as follow-up changes land.
 
+## Implemented provider configuration and financial truthfulness
+
+`platform_settings` now persists enablement, setup state, scan-root overrides, and independent provider plans. Fresh dashboard launches wait for card-based selection; scan cycles resolve the saved set every time. “All” is scoped to enabled providers. Provider analytics keep API-equivalent token estimates, monthly subscriptions, Codex credit estimates, cache savings, and pricing coverage separate. Codex cache writes are explicitly marked unreported rather than stored or displayed as a known zero.
+
+Forked Codex child files are also handled as a provider-native shape: the child header ID is the agent identity and the embedded copied parent history is skipped so it cannot duplicate parent tokens or cost.
+
+## Implemented platform adapter
+
+Codex normalization now lives in a registered `token_dashboard/codex.py` pipeline, separate from both the shared scanner and the Claude pipeline. Canonical message/tool/agent fields remain comparable, while `codex_turns` and `codex_rate_limits` retain task lifecycle, timing, execution profiles, context, and quota telemetry without forcing Claude into fake equivalents. Function calls, custom calls, nested desktop `exec` calls, tool search, web search, patches, results, errors, response phases, and child-thread identity are normalized. Prompt analytics aggregate all model calls belonging to one user turn.
+
 ## 1. Transcript and source schema
 
 - Track transcript source explicitly so Claude and Codex records can live in the same SQLite database without guessing from paths.

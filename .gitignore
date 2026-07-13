@@ -8,3 +8,7 @@ node_modules/
 .superpowers/
 .claude/
 docs/superpowers/
+
+# LoopKit ephemeral loop artifacts (runtime scratch; workflow docs under docs/ stay tracked)
+.agent/
+step_plan.md

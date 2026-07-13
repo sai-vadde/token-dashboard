@@ -1,0 +1,5 @@
+{"timestamp":"2026-07-10T01:00:00Z","type":"session_meta","payload":{"session_id":"codex-child-1","id":"codex-child-1","cwd":"C:\\work\\codex-demo","cli_version":"1.2.3","parent_thread_id":"codex-parent-1","agent_role":"reviewer","agent_nickname":"Ada","model_provider":"openai"}}
+{"timestamp":"2026-07-10T01:00:01Z","type":"turn_context","payload":{"turn_id":"child-turn-1","cwd":"C:\\work\\codex-demo","model":"gpt-5.4","effort":"high"}}
+{"timestamp":"2026-07-10T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Review the implementation"}}
+{"timestamp":"2026-07-10T01:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Review complete."}]}}
+{"timestamp":"2026-07-10T01:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":3,"total_tokens":110},"model_context_window":1000}}}

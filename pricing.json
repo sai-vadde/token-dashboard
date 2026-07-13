@@ -3,17 +3,63 @@
     "claude-opus-4-7":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
     "claude-opus-4-6":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
     "claude-sonnet-4-6":   { "tier": "sonnet", "input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_create_5m":  3.75, "cache_create_1h":  6.00 },
-    "claude-haiku-4-5":    { "tier": "haiku",  "input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_create_5m":  1.25, "cache_create_1h":  2.00 }
+    "claude-haiku-4-5":    { "tier": "haiku",  "input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_create_5m":  1.25, "cache_create_1h":  2.00 },
+    "gpt-5":                { "tier": "gpt-5",   "input": 1.25, "output": 10.00, "cache_read": 0.125, "cache_create_5m": 1.25, "cache_create_1h": 1.25 },
+    "gpt-5-codex":          { "tier": "gpt-5",   "input": 1.25, "output": 10.00, "cache_read": 0.125, "cache_create_5m": 1.25, "cache_create_1h": 1.25 },
+    "gpt-5.2":              { "tier": "gpt-5.2", "input": 1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m": 1.75, "cache_create_1h": 1.75 },
+    "gpt-5.2-codex":        { "tier": "gpt-5.2", "input": 1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m": 1.75, "cache_create_1h": 1.75 },
+    "gpt-5.3-codex":        { "tier": "gpt-5.3", "input": 1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m": 1.75, "cache_create_1h": 1.75 },
+    "gpt-5.4":              { "tier": "gpt-5.4", "input": 2.50, "output": 15.00, "cache_read": 0.25,  "cache_create_5m": 2.50, "cache_create_1h": 2.50 },
+    "gpt-5.4-mini":         { "tier": "gpt-5.4-mini", "input": 0.75, "output": 4.50, "cache_read": 0.075, "cache_create_5m": 0.75, "cache_create_1h": 0.75 },
+    "gpt-5.5":              { "tier": "gpt-5.5", "input": 5.00, "output": 30.00, "cache_read": 0.50,  "cache_create_5m": 5.00, "cache_create_1h": 5.00 },
+    "gpt-5.6-sol":          { "tier": "gpt-5.6-sol", "input": 5.00, "output": 30.00, "cache_read": 0.50, "cache_create_5m": 6.25, "cache_create_1h": 6.25 }
   },
   "tier_fallback": {
     "opus":   { "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
     "sonnet": { "input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_create_5m":  3.75, "cache_create_1h":  6.00 },
-    "haiku":  { "input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_create_5m":  1.25, "cache_create_1h":  2.00 }
+    "haiku":  { "input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_create_5m":  1.25, "cache_create_1h":  2.00 },
+    "gpt-5":   { "input":  1.25, "output": 10.00, "cache_read": 0.125, "cache_create_5m": 1.25, "cache_create_1h": 1.25 },
+    "gpt-5.2": { "input":  1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m": 1.75, "cache_create_1h": 1.75 },
+    "gpt-5.3": { "input":  1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m": 1.75, "cache_create_1h": 1.75 },
+    "gpt-5.4": { "input":  2.50, "output": 15.00, "cache_read": 0.25, "cache_create_5m": 2.50, "cache_create_1h": 2.50 },
+    "gpt-5.4-mini": { "input": 0.75, "output": 4.50, "cache_read": 0.075, "cache_create_5m": 0.75, "cache_create_1h": 0.75 },
+    "gpt-5.5": { "input": 5.00, "output": 30.00, "cache_read": 0.50, "cache_create_5m": 5.00, "cache_create_1h": 5.00 },
+    "gpt-5.6-sol": { "input": 5.00, "output": 30.00, "cache_read": 0.50, "cache_create_5m": 6.25, "cache_create_1h": 6.25 }
   },
   "plans": {
     "api":     { "monthly": 0,   "label": "API (pay-per-token)" },
     "pro":     { "monthly": 20,  "label": "Pro" },
     "max":     { "monthly": 100, "label": "Max" },
     "max-20x": { "monthly": 200, "label": "Max 20x" }
+  },
+  "provider_plans": {
+    "claude": {
+      "api": { "monthly": 0, "label": "API (pay per token)" },
+      "pro": { "monthly": 20, "label": "Claude Pro" },
+      "max": { "monthly": 100, "label": "Claude Max 5x" },
+      "max-20x": { "monthly": 200, "label": "Claude Max 20x" },
+      "custom": { "monthly": null, "label": "Team / Enterprise" }
+    },
+    "codex": {
+      "api": { "monthly": 0, "label": "OpenAI API" },
+      "free": { "monthly": 0, "label": "ChatGPT Free" },
+      "plus": { "monthly": 20, "label": "ChatGPT Plus" },
+      "pro": { "monthly": 200, "label": "ChatGPT Pro" },
+      "business": { "monthly": null, "label": "Business" },
+      "enterprise": { "monthly": null, "label": "Enterprise / Edu" }
+    }
+  },
+  "codex_credit_rates": {
+    "gpt-5.2": { "input": 43.75, "cache_read": 4.375, "output": 350.0 },
+    "gpt-5.2-codex": { "input": 43.75, "cache_read": 4.375, "output": 350.0 },
+    "gpt-5.3-codex": { "input": 43.75, "cache_read": 4.375, "output": 350.0 },
+    "gpt-5.4": { "input": 62.5, "cache_read": 6.25, "output": 375.0 },
+    "gpt-5.4-mini": { "input": 18.75, "cache_read": 1.875, "output": 113.0 },
+    "gpt-5.5": { "input": 125.0, "cache_read": 12.5, "output": 750.0 },
+    "gpt-5.6-sol": { "input": 125.0, "cache_read": 12.5, "output": 750.0 }
+  },
+  "provenance": {
+    "updated": "2026-07-11",
+    "note": "Offline estimates from provider-published API and Codex rate cards; subscription fees are shown separately from API-equivalent usage."
   }
 }

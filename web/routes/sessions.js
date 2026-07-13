@@ -4,14 +4,21 @@ export default async function (root) {
   const hash = location.hash.replace(/^#/, '');
   const [pathPart, query = ''] = hash.split('?');
   const id = decodeURIComponent(pathPart.split('/')[2] || '');
-  const source = new URLSearchParams(query).get('source');
+  const params = new URLSearchParams(query);
+  const source = params.get('source');
+  const agentId = params.get('agent_id');
   if (!id) return renderList(root);
-  return renderSession(root, id, source);
+  return renderSession(root, id, source, agentId);
 }
 
 function sessionHref(session) {
   const suffix = session.source ? `?source=${encodeURIComponent(session.source)}` : '';
   return `#/sessions/${encodeURIComponent(session.session_id)}${suffix}`;
+}
+
+function metadata(row) {
+  try { return row.source_metadata_json ? JSON.parse(row.source_metadata_json) : {}; }
+  catch { return {}; }
 }
 
 async function renderList(root) {
@@ -20,7 +27,7 @@ async function renderList(root) {
     <div class="card">
       <h2>Sessions</h2>
       <table>
-        <thead><tr><th>started</th><th>source</th><th>project</th><th class="num">turns</th><th class="num">tokens</th><th>session</th></tr></thead>
+        <thead><tr><th>started</th><th>source</th><th>project</th><th class="num">turns</th><th class="num">model calls</th><th class="num">tokens</th><th class="num">peak context</th><th>session</th></tr></thead>
         <tbody>
           ${list.map(s => `
             <tr>
@@ -28,7 +35,9 @@ async function renderList(root) {
               <td><span class="badge">${fmt.htmlSafe(s.source || 'claude')}</span></td>
               <td title="${fmt.htmlSafe(s.project_slug)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</td>
               <td class="num">${fmt.int(s.turns)}</td>
+              <td class="num">${fmt.int(s.model_calls)}</td>
               <td class="num">${fmt.int(s.tokens)}</td>
+              <td class="num">${fmt.pct(s.peak_context_utilization)}</td>
               <td><a href="${sessionHref(s)}" class="mono">${fmt.htmlSafe(s.session_id.slice(0,8))}…</a></td>
             </tr>`).join('')}
         </tbody>
@@ -36,15 +45,23 @@ async function renderList(root) {
     </div>`;
 }
 
-async function renderSession(root, id, source) {
-  const turns = await api('/api/sessions/' + encodeURIComponent(id) + (source ? '?source=' + encodeURIComponent(source) : ''));
-  let totalIn = 0, totalOut = 0, totalCacheRd = 0;
+async function renderSession(root, id, source, agentId) {
+  const query = new URLSearchParams();
+  if (source) query.set('source', source);
+  if (agentId) query.set('agent_id', agentId);
+  const queryString = query.toString();
+  const turns = await api('/api/sessions/' + encodeURIComponent(id) + (queryString ? '?' + queryString : ''));
+  let totalIn = 0, totalOut = 0, totalCacheRd = 0, totalReasoning = 0, peakContext = 0;
   let modelCounts = {};
   for (const t of turns) {
     if (t.type !== 'assistant') continue;
     totalIn += t.input_tokens || 0;
     totalOut += t.output_tokens || 0;
     totalCacheRd += t.cache_read_tokens || 0;
+    totalReasoning += t.reasoning_output_tokens || 0;
+    if (t.context_window) {
+      peakContext = Math.max(peakContext, ((t.input_tokens || 0) + (t.cache_read_tokens || 0)) / t.context_window);
+    }
     const m = t.model || 'unknown';
     modelCounts[m] = (modelCounts[m] || 0) + 1;
   }
@@ -55,41 +72,50 @@ async function renderSession(root, id, source) {
   const started = (turns[0] && turns[0].timestamp) || '';
   const ended = (turns[turns.length-1] && turns[turns.length-1].timestamp) || '';
   const selectedSource = source || ((turns[0] && turns[0].source) || '');
+  const selectedAgent = agentId && turns[0]
+    ? (turns[0].agent_name || turns[0].agent_type || turns[0].agent_id)
+    : null;
 
   root.innerHTML = `
     <div class="card">
       <h2 style="display:flex;align-items:center">
-        <span>Session ${fmt.htmlSafe(id.slice(0,8))}…</span>
+        <span>${selectedAgent ? 'Agent run' : 'Session'} ${fmt.htmlSafe(id.slice(0,8))}…</span>
         <span class="spacer"></span>
         <a href="#/sessions" class="muted">← all sessions</a>
       </h2>
       <div class="flex muted" style="font-family:var(--mono);font-size:12px;flex-wrap:wrap;gap:14px">
         ${selectedSource ? `<span>${fmt.htmlSafe(selectedSource)}</span>` : ''}
+        ${selectedAgent ? `<span class="badge">${fmt.htmlSafe(selectedAgent)}</span>` : ''}
         <span>${fmt.htmlSafe(project)}</span>
         <span>${fmt.ts(started)} → ${fmt.ts(ended)}</span>
         <span>${turns.length} records</span>
-        <span>${fmt.int(totalIn)} in · ${fmt.int(totalOut)} out · ${fmt.int(totalCacheRd)} cache rd</span>
+        <span>${fmt.int(totalIn)} in · ${fmt.int(totalOut)} out · ${fmt.int(totalCacheRd)} cache rd · ${fmt.int(totalReasoning)} reasoning</span>
+        ${peakContext ? `<span>${fmt.pct(peakContext)} peak context</span>` : ''}
       </div>
     </div>
 
     <div class="card" style="margin-top:16px">
       <h3>Turn-by-turn</h3>
       <table>
-        <thead><tr><th>time</th><th>type</th><th>model</th><th class="blur-sensitive">prompt / tools</th><th class="num">in</th><th class="num">out</th><th class="num">cache rd</th></tr></thead>
+        <thead><tr><th>time</th><th>type</th><th>model</th><th class="blur-sensitive">prompt / response / tools</th><th class="num">in</th><th class="num">out</th><th class="num">cache rd</th><th class="num">reason</th><th class="num">context</th></tr></thead>
         <tbody>
           ${turns.map(t => {
             const tools = t.tool_calls_json ? JSON.parse(t.tool_calls_json) : [];
+            const meta = metadata(t);
             const summary = t.prompt_text ? fmt.short(t.prompt_text, 110)
+              : t.response_text ? fmt.short(t.response_text, 110)
               : tools.length ? tools.map(x => x.name).join(' · ')
               : '';
             return `<tr>
               <td class="mono">${(t.timestamp || '').slice(11,19)}</td>
-              <td>${t.type}${t.is_sidechain ? ' <span class="badge">side</span>' : ''}</td>
+              <td>${t.type}${t.is_sidechain ? ' <span class="badge">agent</span>' : ''}${meta.phase ? ` <span class="badge">${fmt.htmlSafe(meta.phase)}</span>` : ''}</td>
               <td>${t.model ? `<span class="badge ${fmt.modelClass(t.model)}">${fmt.htmlSafe(fmt.modelShort(t.model))}</span>` : ''}</td>
               <td class="blur-sensitive">${fmt.htmlSafe(summary)}</td>
               <td class="num">${fmt.int(t.input_tokens)}</td>
               <td class="num">${fmt.int(t.output_tokens)}</td>
               <td class="num">${fmt.int(t.cache_read_tokens)}</td>
+              <td class="num">${fmt.int(t.reasoning_output_tokens)}</td>
+              <td class="num">${t.context_window ? fmt.pct(((t.input_tokens || 0) + (t.cache_read_tokens || 0)) / t.context_window) : '—'}</td>
             </tr>`;
           }).join('')}
         </tbody>

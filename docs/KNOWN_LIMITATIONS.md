@@ -4,25 +4,33 @@ None of these are blockers. The dashboard still gives you useful information, bu
 
 ## Skills token counts are partial
 
-The Skills route shows every skill invoked, how many times, across how many sessions, and when. The **tokens-per-call** column is populated only for skills whose `SKILL.md` lives under the catalog roots currently scanned by `token_dashboard/skills.py`, such as `~/.claude/skills/`, `~/.claude/scheduled-tasks/`, and `~/.claude/plugins/`. Skills registered elsewhere (project-local skills, Codex plugin cache paths not included in the catalog, or invocations that go through a subagent rather than a direct `Skill` tool call) show invocation counts but leave the token column blank.
+The Skills route shows every explicit `Skill` tool invocation, how many times, across how many sessions, and when. The **tokens-per-call** column is populated for discovered `SKILL.md` files under Claude roots, `~/.codex/skills`, the Codex plugin cache, and `~/.agents/skills`. Project-local skills, non-standard roots, and skills loaded implicitly or through a subagent can still lack direct invocation or token attribution.
 
 It's still a useful view: you can see which skills dominate your session time. Just don't expect a complete per-skill token cost. PRs to broaden the catalog scan welcome.
 
-## Cost for Pro / Max / Max-20x users is shown as API-equivalent, not subscription value
+## API-equivalent usage is not subscription spend
 
-The Settings route lets you select your pricing plan, but the Overview cost number is always the API-equivalent (what the same usage would have cost on pay-per-token rates). If you're on Pro you pay a flat $20/month regardless of how much of that API-equivalent number you rack up. We don't do "subscription ROI" math yet because plan limits are not all published as public machine-readable pricing data.
+The Platforms route saves a separate plan for every provider. API-equivalent token cost and monthly subscription commitment are deliberately shown as different values. The former is useful for workload comparison; it is not a claim about the user's actual subscription bill. Unknown models make the estimate a lower bound and reduce its displayed pricing coverage.
 
 ## Remote/server-side sessions are invisible
 
 If a tool mode does not write local JSONL transcripts, the dashboard cannot see it. That includes Claude Cowork/server-side sessions and any Codex session that is not persisted under the configured `CODEX_SESSIONS_DIR`.
 
-## Codex cache-create buckets are not available yet
+## Claude context-window size is inferred, not recorded
 
-Codex token-count records expose input, cached input, and output tokens in the scanner paths covered today. The dashboard maps cached input to `cache_read_tokens`, but leaves the 5-minute and 1-hour cache-create buckets at zero for Codex rows unless future transcript records expose those fields.
+Codex token events report the model context window directly, but Claude Code transcripts omit it. The scanner infers it per turn: Claude exposes a standard 200K window and an opt-in 1M beta window (Sonnet) with nothing in between, so any turn whose prompt (new input + cache reads) exceeds 200K is attributed to the 1M window and everything else to 200K. This keeps peak-context utilization meaningful and bounded at 100%, but a 1M-beta session that never crosses 200K of load is measured against the 200K window, so its utilization reads higher than the true 1M figure.
+
+## Codex cache writes are not reported by current local token events
+
+Codex token-count records expose input, cached input, and output tokens in the scanner paths covered today. The dashboard maps cached input to `cache_read_tokens`, but presents write tokens/events as unavailable—not zero. A later cache read does not prove that a write happened inside the scanned session, so the dashboard does not reverse-infer creation counts. Cache-read savings remain an estimate against the model's uncached API input rate.
 
 ## Codex changed files replay from the beginning
 
 Claude project JSONL files can be resumed from the last byte offset. Codex records depend on earlier session metadata and turn context, so when a Codex file changes the scanner replays that file from byte zero. Inserts are idempotent, so totals stay stable, but very large active Codex transcripts may take longer to rescan.
+
+## Codex lifecycle and quota fields depend on transcript version
+
+The Codex tab records task timing, policies, collaboration mode, and quota windows only when those events exist in the local JSONL. Older transcripts remain valid and continue contributing canonical token/tool totals, but their Codex-only fields may be blank. Quota snapshots describe the local transcript at the time of each token event; they are not fetched from a remote billing API.
 
 ## Non-standard model names get tier-fallback pricing
 

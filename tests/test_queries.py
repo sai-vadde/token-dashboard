@@ -8,6 +8,7 @@ from token_dashboard.db import (
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, project_name_for,
     skill_breakdown, source_summary,
+    agent_breakdown,
 )
 
 
@@ -48,6 +49,23 @@ class QueryTests(unittest.TestCase):
         rows = expensive_prompts(self.db, limit=10, sort="recent")
         self.assertEqual(rows[0]["prompt_text"], "small")
         self.assertEqual(rows[1]["prompt_text"], "big prompt")
+
+    def test_expensive_prompts_aggregates_all_model_calls_for_one_prompt(self):
+        with connect(self.db) as c:
+            c.execute("""
+              INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, type, timestamp, model,
+                input_tokens, output_tokens, cache_read_tokens, reasoning_output_tokens, response_text)
+              VALUES ('a1b','u1','s1','projA','assistant','2026-04-10T00:00:02Z','claude-opus-4-7',
+                7,8,9,3,'done')
+            """)
+            c.commit()
+        rows = expensive_prompts(self.db, limit=10)
+        big = next(row for row in rows if row["user_uuid"] == "u1")
+        self.assertEqual(big["model_calls"], 2)
+        self.assertEqual(big["billable_tokens"], 315)
+        self.assertEqual(big["cache_read_tokens"], 309)
+        self.assertEqual(big["reasoning_output_tokens"], 3)
+        self.assertEqual(big["response_text"], "done")
 
     def test_project_summary_groups(self):
         rows = project_summary(self.db)
@@ -93,6 +111,20 @@ class QueryTests(unittest.TestCase):
         filtered = model_breakdown(self.db, since="2026-04-11T00:00:00Z")
         names = [r["model"] for r in filtered]
         self.assertEqual(names, ["claude-sonnet-4-6"])
+
+    def test_codex_child_thread_is_attributed_as_agent(self):
+        with connect(self.db) as c:
+            c.execute("""
+              INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, model,
+                input_tokens, output_tokens, reasoning_output_tokens, source, is_sidechain, agent_id)
+              VALUES ('codex-agent','child-1','projA','assistant','2026-04-12T00:00:00Z','gpt-5',
+                20,10,4,'codex',1,'reviewer')
+            """)
+            c.commit()
+        rows = agent_breakdown(self.db, source="codex")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["agent_type"], "reviewer")
+        self.assertEqual(rows[0]["reasoning_output_tokens"], 4)
 
 
 class SkillBreakdownTests(unittest.TestCase):
@@ -212,6 +244,7 @@ class SourceFilterTests(unittest.TestCase):
         rows = {r["source"]: r for r in source_summary(self.db)}
         self.assertEqual(rows["claude"]["sessions"], 1)
         self.assertEqual(rows["codex"]["tokens"], 75)
+        self.assertEqual(rows["codex"]["model_calls"], 1)
 
     def test_recent_sessions_groups_same_id_by_source(self):
         with connect(self.db) as c:
@@ -224,6 +257,14 @@ class SourceFilterTests(unittest.TestCase):
         rows = recent_sessions(self.db, limit=10)
         same_id = sorted(r["source"] for r in rows if r["session_id"] == "claude-s")
         self.assertEqual(same_id, ["claude", "codex"])
+
+    def test_recent_sessions_accepts_list_source(self):
+        # Regression: source="all" passes the enabled-source list here. The
+        # per-row project-name lookup used to bind that list as a SQL parameter
+        # and crash the request thread with "type 'list' is not supported".
+        rows = recent_sessions(self.db, limit=10, source=["claude", "codex"])
+        by_source = sorted(r["source"] for r in rows)
+        self.assertEqual(by_source, ["claude", "codex"])
 
 
 class ProjectNameInQueriesTests(unittest.TestCase):

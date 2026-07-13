@@ -50,3 +50,34 @@ python3 -m unittest discover tests        # all tests
 python3 cli.py dashboard --no-open        # start the server
 curl http://127.0.0.1:8080/api/overview   # sanity-check an endpoint
 ```
+
+## Agentic workflow (LoopKit)
+
+This repo has a LoopKit-style agent loop. Before orchestrating multi-step work,
+read `docs/agent_loop_rules.md` (tiers, roles, retry caps), `docs/feature_log.md`
+(status index), and `docs/blockers.md`. Invariants that must not be crossed
+without a human decision live in `docs/BOUNDARIES.md`.
+
+**Take the cheapest sufficient path.** The four subagents are a capability menu,
+not a mandatory pipeline — a subagent costs more tokens than the orchestrator
+doing the work. A small, clear change stays with the main agent (Tier 1: it
+writes and runs `python scripts/full_check.py` itself — no plan, no coder, no
+reviewer). Only escalate to `step-coder`/planner/reviewer/tester when the task
+actually earns it, spawn only the roles it needs, and run independent
+verification (reviewer + tester) in parallel — never a strict one-on-one serial
+loop.
+
+- **Single check entry point:** `python scripts/full_check.py` — runs the
+  unittest suite + a server smoke check, writes compact evidence to `.agent/`
+  (tails) and full logs to `.agent/raw/`. Do not run raw test commands for the
+  loop; the harness is the contract.
+- **Roles** are Claude Code subagents in `.claude/agents/` (`technical-planner`,
+  `step-coder`, `step-intent-reviewer`, `adversarial-tester`). The intent
+  reviewer and tester have no Write/Edit tools by design.
+- **Loop wiring:** the `SubagentStop` hook in `.claude/settings.json` runs the
+  check harness when `step-coder` drops `.agent/coder_done`, plus tallies
+  per-agent token usage into `.agent/token_summary.md`. Never ask an agent to
+  report its own usage. (`.claude/` and `.agent/` are gitignored — the loop
+  mechanics are local; the workflow docs under `docs/` are tracked.)
+- **The hooks require interactive trust** in a `claude` terminal session before
+  they fire — a wired-but-untrusted hook is silently skipped.

@@ -10,6 +10,10 @@ from pathlib import Path
 from token_dashboard.db import init_db, default_db_path, overview_totals
 from token_dashboard.scanner import scan_dir
 from token_dashboard.tips import all_tips
+from token_dashboard.providers import PLATFORMS, effective_scan_roots, enabled_sources, platforms_configured
+
+
+AVAILABLE_SOURCES = tuple(p["source"] for p in PLATFORMS if p["status"] == "available")
 
 
 def _db_path(args) -> str:
@@ -17,28 +21,33 @@ def _db_path(args) -> str:
 
 
 def _default_root(source: str) -> str:
-    if source == "codex":
-        return os.environ.get("CODEX_SESSIONS_DIR") or str(Path.home() / ".codex" / "sessions")
-    return os.environ.get("CLAUDE_PROJECTS_DIR") or str(Path.home() / ".claude" / "projects")
+    provider = next((p for p in PLATFORMS if p["source"] == source and p["status"] == "available"), None)
+    if not provider:
+        raise ValueError(f"unsupported source: {source}")
+    return os.environ.get(provider["root_env"]) or str(Path.home() / Path(provider["default_root"]))
 
 
 def _source(args) -> str:
     return (args.source or os.environ.get("TOKEN_DASHBOARD_SOURCE") or "all").lower()
 
 
-def _scan_roots(args):
+def _scan_roots(args, db: str = None, respect_enabled: bool = True):
     source = _source(args)
     if args.projects_dir:
-        selected = args.source if args.source in ("claude", "codex") else "claude"
+        selected = args.source if args.source in AVAILABLE_SOURCES else "claude"
         return [(selected, args.projects_dir)]
-    if source in ("claude", "codex"):
+    if source in AVAILABLE_SOURCES:
         return [(source, _default_root(source))]
-    return [("claude", _default_root("claude")), ("codex", _default_root("codex"))]
+    roots = [(provider, _default_root(provider)) for provider in AVAILABLE_SOURCES]
+    if db and respect_enabled and platforms_configured(db):
+        expanded = [(provider, root, db) for provider, root in roots]
+        return [(provider, root) for provider, root, _ in effective_scan_roots(db, expanded)]
+    return roots
 
 
 def _scan_all(args, db: str) -> dict:
     totals = {"messages": 0, "tools": 0, "files": 0, "sources": {}}
-    for source, root in _scan_roots(args):
+    for source, root in _scan_roots(args, db):
         n = scan_dir(root, db, source=source)
         totals["sources"][source] = n
         totals["messages"] += n["messages"]
@@ -54,6 +63,13 @@ def _today_range():
     return start, end
 
 
+def _display_scope(args, db: str):
+    selected = _source(args)
+    if selected != "all":
+        return selected
+    return enabled_sources(db) if platforms_configured(db) else None
+
+
 def cmd_scan(args):
     db = _db_path(args)
     init_db(db)
@@ -65,7 +81,7 @@ def cmd_today(args):
     db = _db_path(args)
     init_db(db)
     s, e = _today_range()
-    source = None if _source(args) == "all" else _source(args)
+    source = _display_scope(args, db)
     t = overview_totals(db, since=s, until=e, source=source)
     print("Token Dashboard — today")
     print(f"  sessions: {t['sessions']}    turns: {t['turns']}")
@@ -76,7 +92,7 @@ def cmd_today(args):
 def cmd_stats(args):
     db = _db_path(args)
     init_db(db)
-    source = None if _source(args) == "all" else _source(args)
+    source = _display_scope(args, db)
     t = overview_totals(db, source=source)
     print("Token Dashboard — all time")
     print(f"  sessions: {t['sessions']}    turns: {t['turns']}")
@@ -86,8 +102,13 @@ def cmd_stats(args):
 def cmd_tips(args):
     db = _db_path(args)
     init_db(db)
-    source = None if _source(args) == "all" else _source(args)
-    tips = all_tips(db, source=source)
+    source = _display_scope(args, db)
+    tips = []
+    if isinstance(source, list):
+        for enabled_source in source:
+            tips.extend(all_tips(db, source=enabled_source))
+    else:
+        tips = all_tips(db, source=source)
     if not tips:
         print("Token Dashboard: no suggestions")
         return
@@ -99,7 +120,7 @@ def cmd_tips(args):
 def cmd_dashboard(args):
     db = _db_path(args)
     init_db(db)
-    if not args.no_scan:
+    if not args.no_scan and platforms_configured(db):
         _scan_all(args, db)
     from token_dashboard.server import run
 
@@ -109,14 +130,14 @@ def cmd_dashboard(args):
     if not args.no_open:
         webbrowser.open(url)
     print(f"Token Dashboard listening on {url}")
-    run(host, port, db, _scan_roots(args))
+    run(host, port, db, _scan_roots(args, db, respect_enabled=False))
 
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="SQLite path (default ~/.codex/token-dashboard.db)")
     common.add_argument("--projects-dir", help="Single JSONL root override")
-    common.add_argument("--source", choices=("all", "claude", "codex"), help="Transcript source to scan or display (default all)")
+    common.add_argument("--source", choices=("all", *AVAILABLE_SOURCES), help="Transcript source to scan or display (default all enabled)")
 
     p = argparse.ArgumentParser(prog="token-dashboard", description="Local Claude/Codex usage dashboard", parents=[common])
     sub = p.add_subparsers(dest="cmd", required=True)

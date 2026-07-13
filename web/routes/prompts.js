@@ -51,6 +51,7 @@ export default async function (root) {
           <th>model</th>
           <th class="num">tokens</th>
           <th class="num">cache rd</th>
+          <th class="num">reasoning</th>
           <th>session</th>
         </tr></thead>
         <tbody>
@@ -61,8 +62,9 @@ export default async function (root) {
               <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
               <td class="num">${fmt.int(r.billable_tokens)}</td>
               <td class="num">${fmt.int(r.cache_read_tokens)}</td>
+              <td class="num">${fmt.int(r.reasoning_output_tokens)}</td>
               <td><a href="${sessionHref(r)}" class="mono" onclick="event.stopPropagation()">${r.source ? `<span class="badge">${fmt.htmlSafe(r.source)}</span> ` : ''}${fmt.htmlSafe(r.session_id.slice(0,8))}…</a></td>
-            </tr>`).join('') || '<tr><td colspan="6" class="muted">no prompts yet</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="7" class="muted">no prompts yet</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -84,9 +86,10 @@ export default async function (root) {
             <span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span>
           </h3>
           <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
+          ${r.response_text ? `<h3 style="margin-top:16px">Assistant response</h3><pre class="blur-sensitive">${fmt.htmlSafe(r.response_text)}</pre>` : ''}
           <div class="flex" style="margin-top:12px;flex-wrap:wrap;gap:14px">
             <span class="muted">${fmt.ts(r.timestamp)}</span>
-            <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ~${fmt.usd4(r.estimated_cost_usd)} cache cost</span>
+            <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ${fmt.int(r.reasoning_output_tokens)} reasoning · ${fmt.int(r.model_calls)} model calls · ~${fmt.usd4(r.estimated_cost_usd)}</span>
             <span class="spacer"></span>
             <a href="${sessionHref(r)}">Open session →</a>
           </div>

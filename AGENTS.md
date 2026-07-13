@@ -10,11 +10,11 @@ Inspired by [phuryn/claude-usage](https://github.com/phuryn/claude-usage) but di
 
 ## Status
 
-Working codebase. Python unit tests run with `python3 -m unittest discover tests`. Seven UI tabs are wired up (Overview, Prompts, Sessions, Projects, Skills, Tips, Settings). Runs on macOS, Windows, and Linux.
+Working codebase. Python unit tests run with `python3 -m unittest discover tests`. Nine UI tabs are wired up (Overview, Prompts, Sessions, Projects, Skills, Agents, Platforms, Tips, Settings), with Codex-native analytics opened from its platform card. Runs on macOS, Windows, and Linux.
 
 ## Architecture
 
-- `cli.py` -> `token_dashboard/scanner.py` -> `~/.codex/token-dashboard.db` (SQLite)
+- `cli.py` -> shared `token_dashboard/scanner.py` -> registered source pipeline (`claude.py` / `codex.py`) -> `~/.codex/token-dashboard.db`
 - `token_dashboard/server.py` exposes JSON APIs (`/api/*`) + SSE stream (`/api/stream`) + static frontend (`web/`)
 - `web/` is vanilla JS, no build step: hash router + ECharts + top-bar source switcher
 
@@ -22,7 +22,7 @@ Working codebase. Python unit tests run with `python3 -m unittest discover tests
 
 Claude Code writes one JSONL file per session to `~/.claude/projects/<project-slug>/<session-id>.jsonl`. Each line is a message record; usage fields live at `message.usage` and model identifier at `message.model`.
 
-Codex writes dated session JSONL files under `~/.codex/sessions/YYYY/MM/DD/*.jsonl`. Codex records are event-oriented, so the scanner normalizes session metadata, turn context, user-message events, function-call events, function-call-output events, and token-count events into the dashboard's shared `messages` and `tool_calls` tables.
+Codex writes dated session JSONL files under `~/.codex/sessions/YYYY/MM/DD/*.jsonl`. Its pipeline normalizes shared messages/tools while separately persisting task lifecycle and rate-limit events to Codex-owned tables.
 
 The scanner is incremental. Claude scans use each file's mtime and byte offset. Codex changed files replay from byte zero because later usage records depend on earlier context records; deterministic message UUIDs keep that replay idempotent.
 

@@ -5,6 +5,8 @@ A skill on disk lives at one of:
   ~/.claude/scheduled-tasks/<name>/SKILL.md            -> slug "<name>"
   ~/.claude/plugins/marketplaces/*/plugins/<plugin>/skills/<name>/SKILL.md
       -> registers TWO slugs: "<plugin>:<name>" and "<name>"
+  ~/.codex/skills/, ~/.codex/plugins/cache/, ~/.agents/skills/
+      -> Codex, plugin, and shared-agent skill catalogs
       (Claude Code accepts either form in the Skill tool.)
 
 Sizes are in chars; token estimate is chars // 4 (the same approximation
@@ -20,13 +22,16 @@ _DEFAULT_ROOTS = [
     Path.home() / ".claude" / "skills",
     Path.home() / ".claude" / "scheduled-tasks",
     Path.home() / ".claude" / "plugins",
+    Path.home() / ".codex" / "skills",
+    Path.home() / ".codex" / "plugins" / "cache",
+    Path.home() / ".agents" / "skills",
 ]
 
 
 import re
 
 _VERSION_RE = re.compile(r"^\d+\.\d+")
-_STRUCTURE_NAMES = {"skills", "plugins", "marketplaces", "cache", ".claude"}
+_STRUCTURE_NAMES = {"skills", "plugins", "marketplaces", "cache", ".claude", ".codex", ".agents"}
 
 
 def _slugs_for(skill_md: Path) -> list[str]:

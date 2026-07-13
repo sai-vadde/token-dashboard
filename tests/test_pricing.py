@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from token_dashboard.pricing import load_pricing, cost_for, format_for_user
+from token_dashboard.pricing import codex_credits_for, load_pricing, cost_for, financial_summary, format_for_user
 
 PRICING = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "pricing.json"))
 
@@ -40,6 +40,27 @@ class CostTests(unittest.TestCase):
         c_in = cost_for("claude-opus-4-7", self._u(input_tokens=1_000_000), self.p)
         c_cr = cost_for("claude-opus-4-7", self._u(cache_read_tokens=1_000_000), self.p)
         self.assertLess(c_cr["usd"], c_in["usd"])
+
+    def test_codex_model_has_api_equivalent_cost_and_cache_savings(self):
+        c = cost_for("gpt-5.4", self._u(input_tokens=1_000_000, cache_read_tokens=1_000_000), self.p)
+        self.assertAlmostEqual(c["usd"], 2.75, places=4)
+        self.assertAlmostEqual(c["gross_cache_savings_usd"], 2.25, places=4)
+
+    def test_unknown_model_is_not_reported_as_free(self):
+        out = financial_summary([{
+            "model": "future-model", "turns": 2, **self._u(input_tokens=1000),
+        }], self.p)
+        self.assertIsNone(out["api_equivalent_usd"])
+        self.assertEqual(out["pricing_coverage"], 0)
+        self.assertTrue(out["is_lower_bound"])
+
+    def test_current_codex_sol_model_has_credit_coverage(self):
+        credits = codex_credits_for(
+            "gpt-5.6-sol",
+            self._u(input_tokens=1_000_000, cache_read_tokens=1_000_000, output_tokens=1_000_000),
+            self.p,
+        )
+        self.assertAlmostEqual(credits, 887.5, places=4)
 
 
 class PlanFormatTests(unittest.TestCase):

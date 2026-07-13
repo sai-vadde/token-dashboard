@@ -1,0 +1,12 @@
+{"timestamp":"2026-07-11T00:00:00Z","type":"session_meta","payload":{"session_id":"parent-1","id":"child-1","parent_thread_id":"parent-1","thread_source":"subagent","agent_nickname":"Reviewer","cwd":"/repo"}}
+{"timestamp":"2026-07-11T00:00:00Z","type":"session_meta","payload":{"session_id":"parent-1","id":"parent-1","thread_source":"user","cwd":"/repo"}}
+{"timestamp":"2026-07-11T00:00:01Z","type":"turn_context","payload":{"turn_id":"parent-turn","model":"gpt-5.4"}}
+{"timestamp":"2026-07-11T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"copied parent"}}
+{"timestamp":"2026-07-11T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"cached_input_tokens":99,"output_tokens":99}}}}
+{"timestamp":"2026-07-11T00:00:04Z","type":"session_meta","payload":{"session_id":"parent-1","id":"parent-1","thread_source":"user","cwd":"/repo"}}
+{"timestamp":"2026-07-11T00:00:05Z","type":"event_msg","payload":{"type":"agent_message","message":"copied parent tail"}}
+{"timestamp":"2026-07-11T00:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":777,"cached_input_tokens":77,"output_tokens":77}}}}
+{"timestamp":"2026-07-11T00:00:07Z","type":"event_msg","payload":{"type":"task_started","turn_id":"child-turn"}}
+{"timestamp":"2026-07-11T00:00:08Z","type":"turn_context","payload":{"turn_id":"child-turn","model":"gpt-5.4"}}
+{"timestamp":"2026-07-11T00:00:09Z","type":"event_msg","payload":{"type":"user_message","message":"review this"}}
+{"timestamp":"2026-07-11T00:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":10}}}}
